@@ -402,3 +402,77 @@
     background: rgba(0, 0, 0, 0.5);
     z-index: 9998;
 }
+
+/* ==================== 变量操作按钮 ==================== */
+.edp-btn-tiny {
+    padding: 1px 4px;
+    font-size: 10px;
+    cursor: pointer;
+    background: transparent;
+    border: none;
+    opacity: 0.5;
+    transition: opacity 0.2s;
+}
+
+.edp-btn-tiny:hover {
+    opacity: 1;
+}
+
+.edp-var-actions {
+    display: inline-flex;
+    gap: 2px;
+    margin-left: 8px;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.edp-var-item:hover .edp-var-actions,
+.edp-var-group:hover > .edp-var-actions {
+    opacity: 1;
+}
+
+.edp-var-children {
+    border-left: 1px dashed var(--SmartThemeBorderColor);
+    margin-left: 8px;
+}
+
+.edp-collapsible {
+    cursor: pointer;
+}
+
+.edp-collapsible:hover {
+    color: var(--SmartThemeEmColor);
+}
+
+/* ==================== 错误提示 ==================== */
+.edp-error {
+    color: #ff6b6b;
+    font-style: italic;
+}
+
+/* ==================== 预览增强 ==================== */
+.edp-preview-content {
+    position: relative;
+}
+
+.edp-preview-content:empty::before {
+    content: '预览结果将显示在这里';
+    color: var(--SmartThemeQuoteColor);
+    font-style: italic;
+}
+
+/* ==================== 可折叠区域 ==================== */
+.edp-tree-items,
+.edp-var-children {
+    transition: all 0.2s ease;
+}
+
+/* ==================== 高亮变化 ==================== */
+@keyframes edp-highlight {
+    0% { background: rgba(255, 255, 0, 0.3); }
+    100% { background: transparent; }
+}
+
+.edp-var-changed {
+    animation: edp-highlight 1s ease-out;
+}

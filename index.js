@@ -140,6 +140,183 @@ class ConditionEvaluator {
     }
 }
 
+// ==================== 模式校验器 ====================
+
+/**
+ * 模式校验器 - 实现 $meta 保护机制
+ * 参考 MVU 的 $meta 设计，保护变量结构
+ */
+class SchemaValidator {
+    constructor(variableManager) {
+        this.vm = variableManager;
+    }
+    
+    /**
+     * 校验操作是否合法
+     * @param {object} operation - 操作对象
+     * @returns {{ valid: boolean, error?: string }}
+     */
+    validate(operation) {
+        const { op, path, value, from } = operation;
+        
+        // 获取目标路径的 $meta
+        const meta = this._getMetaForPath(path);
+        
+        // 如果没有 $meta，默认允许所有操作
+        if (!meta) {
+            return { valid: true };
+        }
+        
+        switch (op) {
+            case 'add':
+            case 'replace':
+                return this._validateAddOrReplace(path, value, meta);
+            case 'remove':
+                return this._validateRemove(path, meta);
+            case 'move':
+            case 'copy':
+                // 检查源和目标
+                const fromMeta = this._getMetaForPath(from);
+                if (fromMeta && op === 'move') {
+                    const removeCheck = this._validateRemove(from, fromMeta);
+                    if (!removeCheck.valid) return removeCheck;
+                }
+                return this._validateAddOrReplace(path, this.vm.get(from), meta);
+            default:
+                return { valid: true };
+        }
+    }
+    
+    /**
+     * 获取路径对应的 $meta
+     */
+    _getMetaForPath(path) {
+        const keys = PathParser.parse(path);
+        if (keys.length === 0) return null;
+        
+        // 逐级查找 $meta
+        let current = this.vm.statData;
+        let lastMeta = null;
+        
+        for (let i = 0; i < keys.length; i++) {
+            if (current === undefined || current === null) break;
+            
+            // 检查当前层级的 $meta
+            if (typeof current === 'object' && current.$meta) {
+                lastMeta = current.$meta;
+                
+                // 如果是递归可扩展，记住这个 meta
+                if (current.$meta.recursiveExtensible) {
+                    // 继续使用这个 meta
+                }
+            }
+            
+            const key = keys[i];
+            if (typeof key === 'number' && Array.isArray(current)) {
+                current = current[key];
+            } else if (typeof current === 'object') {
+                current = current[key];
+            } else {
+                break;
+            }
+        }
+        
+        // 返回最近找到的 $meta
+        return lastMeta;
+    }
+    
+    /**
+     * 校验添加/替换操作
+     */
+    _validateAddOrReplace(path, value, meta) {
+        const keys = PathParser.parse(path);
+        const targetKey = keys[keys.length - 1];
+        const parentPath = keys.slice(0, -1).join('.');
+        const parent = parentPath ? this.vm.get(parentPath) : this.vm.statData;
+        
+        // 检查是否可扩展
+        if (meta.extensible === false) {
+            // 检查目标键是否已存在
+            if (parent && typeof parent === 'object') {
+                if (!(targetKey in parent)) {
+                    return { valid: false, error: `[Schema] 路径 ${parentPath || 'root'} 不可扩展，不能添加新键 "${targetKey}"` };
+                }
+            }
+        }
+        
+        // 检查必需键（如果是替换整个对象）
+        if (meta.required && typeof value === 'object' && value !== null) {
+            for (const reqKey of meta.required) {
+                if (!(reqKey in value)) {
+                    return { valid: false, error: `[Schema] 缺少必需键 "${reqKey}"` };
+                }
+            }
+        }
+        
+        // 如果有模板，检查值的结构是否符合
+        if (meta.template && typeof value === 'object' && value !== null) {
+            const templateKeys = Object.keys(meta.template);
+            for (const tKey of templateKeys) {
+                if (meta.template[tKey] !== null && !(tKey in value)) {
+                    // 模板中非 null 的键必须存在
+                    // 可以选择自动添加或报错
+                }
+            }
+        }
+        
+        return { valid: true };
+    }
+    
+    /**
+     * 校验删除操作
+     */
+    _validateRemove(path, meta) {
+        const keys = PathParser.parse(path);
+        const targetKey = keys[keys.length - 1];
+        
+        // 检查是否是必需键
+        if (meta.required && meta.required.includes(targetKey)) {
+            return { valid: false, error: `[Schema] 不能删除必需键 "${targetKey}"` };
+        }
+        
+        return { valid: true };
+    }
+    
+    /**
+     * 根据模板创建新对象
+     * @param {string} path - 目标路径
+     * @returns {object|null} 根据模板创建的对象
+     */
+    createFromTemplate(path) {
+        const meta = this._getMetaForPath(path);
+        if (!meta || !meta.template) return null;
+        
+        return deepClone(meta.template);
+    }
+    
+    /**
+     * 注册模式（设置 $meta）
+     * @param {string} path - 路径
+     * @param {object} schema - 模式配置
+     */
+    registerSchema(path, schema) {
+        const target = path ? this.vm.get(path) : this.vm.statData;
+        if (target && typeof target === 'object') {
+            target.$meta = schema;
+        }
+    }
+    
+    /**
+     * 批量注册模式
+     * @param {Array} schemas - 模式数组 [{ path, schema }]
+     */
+    registerSchemas(schemas) {
+        for (const { path, schema } of schemas) {
+            this.registerSchema(path, schema);
+        }
+    }
+}
+
 // ==================== 表达式计算引擎 ====================
 
 /**
@@ -194,6 +371,7 @@ class OperationExecutor {
         this.vm = variableManager;
         this.conditionEvaluator = new ConditionEvaluator(variableManager);
         this.calcEngine = new CalcEngine(variableManager);
+        this.schemaValidator = new SchemaValidator(variableManager);
     }
     
     /**
@@ -207,6 +385,14 @@ class OperationExecutor {
         // 条件检查
         if (operation.if && !this.conditionEvaluator.evaluate(operation.if)) {
             return { success: true, skipped: true };
+        }
+        
+        // 模式校验（如果启用）
+        if (this.vm.schemaValidationEnabled) {
+            const validation = this.schemaValidator.validate(operation);
+            if (!validation.valid) {
+                return { success: false, error: validation.error };
+            }
         }
         
         try {
@@ -416,6 +602,8 @@ class VariableManager {
         this.schema = null;
         this.executor = null;
         this.batchExecutor = null;
+        this.schemaValidator = null;
+        this.schemaValidationEnabled = false; // 默认关闭模式校验
     }
     
     /**
@@ -425,7 +613,41 @@ class VariableManager {
         if (!this.executor) {
             this.executor = new OperationExecutor(this);
             this.batchExecutor = new BatchExecutor(this);
+            this.schemaValidator = new SchemaValidator(this);
         }
+    }
+    
+    /**
+     * 启用/禁用模式校验
+     */
+    setSchemaValidation(enabled) {
+        this.schemaValidationEnabled = enabled;
+    }
+    
+    /**
+     * 注册模式
+     * @param {string} path - 路径
+     * @param {object} schema - 模式配置 { extensible, required, recursiveExtensible, template }
+     */
+    registerSchema(path, schema) {
+        this._initExecutors();
+        this.schemaValidator.registerSchema(path, schema);
+    }
+    
+    /**
+     * 批量注册模式
+     */
+    registerSchemas(schemas) {
+        this._initExecutors();
+        this.schemaValidator.registerSchemas(schemas);
+    }
+    
+    /**
+     * 根据模板创建新对象
+     */
+    createFromTemplate(path) {
+        this._initExecutors();
+        return this.schemaValidator.createFromTemplate(path);
     }
 
     /**
@@ -998,6 +1220,7 @@ class TemplateEngine {
         this.variableManager = variableManager;
         this.templates = new Map();
         this.cache = new Map();
+        this.maxNestingDepth = 10; // 防止无限递归
     }
 
     /**
@@ -1005,7 +1228,38 @@ class TemplateEngine {
      */
     registerTemplate(id, template) {
         this.templates.set(id, template);
-        this.cache.delete(id); // 清除缓存
+        this.cache.delete(id);
+    }
+    
+    /**
+     * 批量注册模板
+     */
+    registerTemplates(templates) {
+        for (const template of templates) {
+            this.registerTemplate(template.id, template);
+        }
+    }
+    
+    /**
+     * 获取模板
+     */
+    getTemplate(id) {
+        return this.templates.get(id);
+    }
+    
+    /**
+     * 获取所有模板
+     */
+    getAllTemplates() {
+        return Array.from(this.templates.values());
+    }
+    
+    /**
+     * 删除模板
+     */
+    deleteTemplate(id) {
+        this.templates.delete(id);
+        this.cache.delete(id);
     }
 
     /**
@@ -1020,51 +1274,99 @@ class TemplateEngine {
             console.warn(`[EDP] 模板不存在: ${templateId}`);
             return '';
         }
-        return this.renderString(template.content, context);
+        return this.renderString(template.content, context, 0);
     }
 
     /**
      * 渲染模板字符串
+     * @param {string} templateStr - 模板字符串
+     * @param {object} context - 上下文
+     * @param {number} depth - 当前嵌套深度
      */
-    renderString(templateStr, context = {}) {
+    renderString(templateStr, context = {}, depth = 0) {
+        if (depth > this.maxNestingDepth) {
+            console.warn('[EDP] 模板嵌套深度超限');
+            return templateStr;
+        }
+        
         let result = templateStr;
         
-        // 1. 处理变量插值 {{path}}
-        result = result.replace(/\{\{([^#/>][^}]*)\}\}/g, (match, path) => {
-            path = path.trim();
-            // 先从 context 查找，再从变量管理器查找
-            if (context[path] !== undefined) {
-                return String(context[path]);
-            }
-            const value = this.variableManager.get(path);
-            return value !== undefined ? String(value) : '';
-        });
+        // 1. 处理嵌套模板 {{> templateId}} 或 {{> templateId param1=value1}}
+        result = this._processNestedTemplates(result, context, depth);
         
         // 2. 处理条件块 {{#if condition}}...{{else}}...{{/if}}
-        result = this._processConditionals(result, context);
+        result = this._processConditionals(result, context, depth);
         
         // 3. 处理循环 {{#each array as item}}...{{/each}}
-        result = this._processLoops(result, context);
+        result = this._processLoops(result, context, depth);
+        
+        // 4. 处理 switch {{#switch path}}{{#case value}}...{{/case}}{{/switch}}
+        result = this._processSwitch(result, context, depth);
+        
+        // 5. 处理变量插值 {{path}} 或 {{path | filter}}
+        result = this._processVariables(result, context);
         
         return result;
+    }
+    
+    /**
+     * 处理嵌套模板 {{> templateId param=value}}
+     */
+    _processNestedTemplates(str, context, depth) {
+        // 匹配 {{> templateId}} 或 {{> templateId key=value key2=value2}}
+        const partialPattern = /\{\{>\s*([^\s}]+)(?:\s+([^}]*))?\}\}/g;
+        
+        return str.replace(partialPattern, (match, templateId, paramsStr) => {
+            const template = this.templates.get(templateId);
+            if (!template) {
+                console.warn(`[EDP] 嵌套模板不存在: ${templateId}`);
+                return '';
+            }
+            
+            // 解析参数
+            const params = this._parseParams(paramsStr || '');
+            const nestedContext = { ...context, ...params };
+            
+            return this.renderString(template.content, nestedContext, depth + 1);
+        });
+    }
+    
+    /**
+     * 解析模板参数 key=value key2="value 2"
+     */
+    _parseParams(paramsStr) {
+        const params = {};
+        const paramPattern = /(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))/g;
+        let match;
+        
+        while ((match = paramPattern.exec(paramsStr)) !== null) {
+            const key = match[1];
+            const value = match[2] ?? match[3] ?? match[4];
+            params[key] = this._parseConditionValue(value);
+        }
+        
+        return params;
     }
 
     /**
      * 处理条件块
      */
-    _processConditionals(str, context) {
+    _processConditionals(str, context, depth) {
+        // 支持嵌套 if
         const ifPattern = /\{\{#if\s+([^}]+)\}\}([\s\S]*?)(?:\{\{else\}\}([\s\S]*?))?\{\{\/if\}\}/g;
         
         return str.replace(ifPattern, (match, condition, thenBlock, elseBlock = '') => {
             const result = this._evaluateCondition(condition.trim(), context);
-            return result ? thenBlock : elseBlock;
+            const block = result ? thenBlock : elseBlock;
+            // 递归处理块内容
+            return this.renderString(block, context, depth);
         });
     }
 
     /**
      * 处理循环
      */
-    _processLoops(str, context) {
+    _processLoops(str, context, depth) {
         const eachPattern = /\{\{#each\s+([^\s]+)\s+as\s+([^\s}]+)\}\}([\s\S]*?)\{\{\/each\}\}/g;
         
         return str.replace(eachPattern, (match, arrayPath, itemVar, body) => {
@@ -1072,22 +1374,128 @@ class TemplateEngine {
             if (!Array.isArray(array)) return '';
             
             return array.map((item, index) => {
-                const itemContext = { ...context, [itemVar]: item, [`${itemVar}Index`]: index };
-                return this.renderString(body, itemContext);
+                const itemContext = {
+                    ...context,
+                    [itemVar]: item,
+                    [`${itemVar}Index`]: index,
+                    [`${itemVar}First`]: index === 0,
+                    [`${itemVar}Last`]: index === array.length - 1
+                };
+                return this.renderString(body, itemContext, depth);
             }).join('');
         });
+    }
+    
+    /**
+     * 处理 switch
+     */
+    _processSwitch(str, context, depth) {
+        const switchPattern = /\{\{#switch\s+([^}]+)\}\}([\s\S]*?)\{\{\/switch\}\}/g;
+        
+        return str.replace(switchPattern, (match, path, body) => {
+            const value = this.variableManager.get(path.trim()) ?? context[path.trim()];
+            
+            // 匹配 case
+            const casePattern = /\{\{#case\s+([^}]+)\}\}([\s\S]*?)(?=\{\{#case|\{\{#default|\{\{\/switch\}\})/g;
+            const defaultPattern = /\{\{#default\}\}([\s\S]*?)(?=\{\{\/switch\}\})/;
+            
+            let caseMatch;
+            while ((caseMatch = casePattern.exec(body)) !== null) {
+                const caseValue = this._parseConditionValue(caseMatch[1].trim());
+                if (value === caseValue) {
+                    return this.renderString(caseMatch[2], context, depth);
+                }
+            }
+            
+            // 默认分支
+            const defaultMatch = body.match(defaultPattern);
+            if (defaultMatch) {
+                return this.renderString(defaultMatch[1], context, depth);
+            }
+            
+            return '';
+        });
+    }
+    
+    /**
+     * 处理变量插值
+     */
+    _processVariables(str, context) {
+        // 支持过滤器 {{path | filter}}
+        return str.replace(/\{\{([^#/>][^}]*)\}\}/g, (match, expr) => {
+            expr = expr.trim();
+            
+            // 检查是否有过滤器
+            const parts = expr.split('|').map(p => p.trim());
+            const path = parts[0];
+            const filters = parts.slice(1);
+            
+            // 获取值
+            let value = context[path] !== undefined ? context[path] : this.variableManager.get(path);
+            
+            // 应用过滤器
+            for (const filter of filters) {
+                value = this._applyFilter(value, filter);
+            }
+            
+            return value !== undefined ? String(value) : '';
+        });
+    }
+    
+    /**
+     * 应用过滤器
+     */
+    _applyFilter(value, filter) {
+        switch (filter) {
+            case 'upper':
+            case 'uppercase':
+                return typeof value === 'string' ? value.toUpperCase() : value;
+            case 'lower':
+            case 'lowercase':
+                return typeof value === 'string' ? value.toLowerCase() : value;
+            case 'trim':
+                return typeof value === 'string' ? value.trim() : value;
+            case 'json':
+                return JSON.stringify(value);
+            case 'length':
+                return Array.isArray(value) ? value.length : (typeof value === 'string' ? value.length : 0);
+            case 'first':
+                return Array.isArray(value) ? value[0] : value;
+            case 'last':
+                return Array.isArray(value) ? value[value.length - 1] : value;
+            case 'reverse':
+                return Array.isArray(value) ? [...value].reverse() : value;
+            case 'sort':
+                return Array.isArray(value) ? [...value].sort() : value;
+            case 'default':
+                return value ?? '';
+            default:
+                // 检查是否是 default(value) 格式
+                if (filter.startsWith('default(') && filter.endsWith(')')) {
+                    const defaultVal = this._parseConditionValue(filter.slice(8, -1));
+                    return value ?? defaultVal;
+                }
+                return value;
+        }
     }
 
     /**
      * 计算条件表达式
      */
     _evaluateCondition(condition, context) {
-        // 简单的条件解析
-        // 支持: path, path > 10, path == "value", !path
-        
         // 否定
         if (condition.startsWith('!')) {
             return !this._evaluateCondition(condition.slice(1).trim(), context);
+        }
+        
+        // 逻辑运算 && ||
+        if (condition.includes('&&')) {
+            const parts = condition.split('&&').map(p => p.trim());
+            return parts.every(p => this._evaluateCondition(p, context));
+        }
+        if (condition.includes('||')) {
+            const parts = condition.split('||').map(p => p.trim());
+            return parts.some(p => this._evaluateCondition(p, context));
         }
         
         // 比较操作
@@ -1120,7 +1528,7 @@ class TemplateEngine {
 
     _parseConditionValue(str) {
         str = str.trim();
-        if ((str.startsWith('"') && str.endsWith('"')) || 
+        if ((str.startsWith('"') && str.endsWith('"')) ||
             (str.startsWith("'") && str.endsWith("'"))) {
             return str.slice(1, -1);
         }
@@ -1132,13 +1540,532 @@ class TemplateEngine {
     }
 }
 
+// ==================== Lorebook 适配器 ====================
+
+/**
+ * Lorebook 适配器 - 将变量系统与 SillyTavern Lorebook 集成
+ * 支持：
+ * 1. 根据变量条件动态控制条目激活
+ * 2. 在条目内容中使用变量插值
+ * 3. 变量变化时自动更新相关条目
+ */
+class LorebookAdapter {
+    constructor(variableManager, templateEngine) {
+        this.vm = variableManager;
+        this.templateEngine = templateEngine;
+        this.conditionEvaluator = new ConditionEvaluator(variableManager);
+        this.managedEntries = new Map(); // 管理的 Lorebook 条目
+        this.entryConditions = new Map(); // 条目的激活条件
+    }
+    
+    /**
+     * 注册一个受管理的 Lorebook 条目
+     * @param {object} entry - Lorebook 条目配置
+     * @param {string} entry.id - 条目 ID
+     * @param {string} entry.name - 条目名称
+     * @param {string} entry.content - 条目内容（支持模板语法）
+     * @param {object} entry.condition - 激活条件
+     * @param {string[]} entry.keys - 触发关键词
+     * @param {number} entry.priority - 优先级
+     */
+    registerEntry(entry) {
+        const { id, condition, ...rest } = entry;
+        this.managedEntries.set(id, { id, ...rest });
+        if (condition) {
+            this.entryConditions.set(id, condition);
+        }
+    }
+    
+    /**
+     * 批量注册条目
+     */
+    registerEntries(entries) {
+        for (const entry of entries) {
+            this.registerEntry(entry);
+        }
+    }
+    
+    /**
+     * 获取条目
+     */
+    getEntry(id) {
+        return this.managedEntries.get(id);
+    }
+    
+    /**
+     * 删除条目
+     */
+    deleteEntry(id) {
+        this.managedEntries.delete(id);
+        this.entryConditions.delete(id);
+    }
+    
+    /**
+     * 检查条目是否应该激活
+     * @param {string} entryId - 条目 ID
+     * @returns {boolean}
+     */
+    isEntryActive(entryId) {
+        const condition = this.entryConditions.get(entryId);
+        if (!condition) return true; // 无条件则默认激活
+        return this.conditionEvaluator.evaluate(condition);
+    }
+    
+    /**
+     * 渲染条目内容（应用变量插值）
+     * @param {string} entryId - 条目 ID
+     * @param {object} context - 额外上下文
+     * @returns {string} 渲染后的内容
+     */
+    renderEntryContent(entryId, context = {}) {
+        const entry = this.managedEntries.get(entryId);
+        if (!entry) return '';
+        return this.templateEngine.renderString(entry.content, context);
+    }
+    
+    /**
+     * 获取所有激活的条目
+     * @returns {Array} 激活的条目列表
+     */
+    getActiveEntries() {
+        const active = [];
+        for (const [id, entry] of this.managedEntries) {
+            if (this.isEntryActive(id)) {
+                active.push({
+                    ...entry,
+                    renderedContent: this.renderEntryContent(id)
+                });
+            }
+        }
+        return active;
+    }
+    
+    /**
+     * 生成 SillyTavern Lorebook 格式的条目
+     * @returns {Array} SillyTavern 格式的条目数组
+     */
+    exportToSillyTavern() {
+        const entries = [];
+        
+        for (const [id, entry] of this.managedEntries) {
+            if (!this.isEntryActive(id)) continue;
+            
+            entries.push({
+                uid: id,
+                key: entry.keys || [],
+                keysecondary: entry.secondaryKeys || [],
+                comment: entry.name || id,
+                content: this.renderEntryContent(id),
+                constant: entry.constant || false,
+                order: entry.priority || 100,
+                position: entry.position || 0, // 0 = before char, 1 = after char
+                disable: false,
+                selectiveLogic: 0,
+                probability: 100,
+            });
+        }
+        
+        return entries;
+    }
+    
+    /**
+     * 从 SillyTavern Lorebook 导入条目
+     * @param {Array} entries - SillyTavern 格式的条目
+     * @param {object} options - 导入选项
+     */
+    importFromSillyTavern(entries, options = {}) {
+        const { addConditions = false, prefix = '' } = options;
+        
+        for (const entry of entries) {
+            this.registerEntry({
+                id: prefix + (entry.uid || entry.comment),
+                name: entry.comment,
+                content: entry.content,
+                keys: entry.key || [],
+                secondaryKeys: entry.keysecondary || [],
+                priority: entry.order || 100,
+                position: entry.position || 0,
+                constant: entry.constant || false,
+            });
+        }
+    }
+}
+
+// ==================== AI 回复处理器 ====================
+
+/**
+ * AI 回复处理器 - 拦截和处理 AI 回复中的变量更新
+ * 支持流式和非流式两种模式
+ */
+class ResponseProcessor {
+    constructor(variableManager, updateParser) {
+        this.vm = variableManager;
+        this.parser = updateParser;
+        this.buffer = ''; // 流式模式缓冲区
+        this.mode = 'background'; // 'streaming' | 'background'
+        this.onUpdate = null; // 更新回调
+        
+        // 标记模式
+        this.markers = {
+            start: '<UpdateVariable>',
+            end: '</UpdateVariable>',
+        };
+    }
+    
+    /**
+     * 设置处理模式
+     * @param {'streaming' | 'background'} mode
+     */
+    setMode(mode) {
+        this.mode = mode;
+    }
+    
+    /**
+     * 设置更新回调
+     * @param {function} callback
+     */
+    setUpdateCallback(callback) {
+        this.onUpdate = callback;
+    }
+    
+    /**
+     * 处理完整回复（非流式）
+     * @param {string} response - AI 回复内容
+     * @returns {{ cleanResponse: string, operations: Array, results: Array }}
+     */
+    processComplete(response) {
+        // 解析操作
+        const operations = this.parser.parse(response);
+        
+        // 执行操作
+        const results = this.parser.executeAll(this.vm, operations);
+        
+        // 清理回复（移除更新标记）
+        const cleanResponse = this._cleanResponse(response);
+        
+        // 触发回调
+        if (this.onUpdate && operations.length > 0) {
+            this.onUpdate({ operations, results });
+        }
+        
+        return { cleanResponse, operations, results };
+    }
+    
+    /**
+     * 处理流式片段
+     * @param {string} chunk - 流式片段
+     * @returns {{ displayChunk: string, pendingOperations: Array }}
+     */
+    processChunk(chunk) {
+        this.buffer += chunk;
+        let displayChunk = chunk;
+        const pendingOperations = [];
+        
+        // 检查是否有完整的更新块
+        while (true) {
+            const startIdx = this.buffer.indexOf(this.markers.start);
+            if (startIdx === -1) break;
+            
+            const endIdx = this.buffer.indexOf(this.markers.end);
+            if (endIdx === -1) {
+                // 更新块未完成，隐藏开始标记之后的内容
+                if (this.mode === 'streaming') {
+                    displayChunk = this.buffer.slice(0, startIdx);
+                }
+                break;
+            }
+            
+            // 提取完整的更新块
+            const blockContent = this.buffer.slice(
+                startIdx + this.markers.start.length,
+                endIdx
+            );
+            
+            // 解析并执行
+            try {
+                const ops = JSON.parse(blockContent.trim());
+                const opsArray = Array.isArray(ops) ? ops : [ops];
+                pendingOperations.push(...opsArray);
+                
+                // 立即执行（流式模式）
+                if (this.mode === 'streaming') {
+                    this.parser.executeAll(this.vm, opsArray);
+                }
+            } catch (e) {
+                console.warn('[EDP] 流式解析失败:', e.message);
+            }
+            
+            // 从缓冲区移除已处理的块
+            this.buffer = this.buffer.slice(0, startIdx) +
+                         this.buffer.slice(endIdx + this.markers.end.length);
+        }
+        
+        return { displayChunk, pendingOperations };
+    }
+    
+    /**
+     * 流式结束时处理
+     * @returns {{ operations: Array, results: Array }}
+     */
+    finishStream() {
+        // 处理缓冲区中剩余的内容
+        const operations = this.parser.parse(this.buffer);
+        const results = this.mode === 'background' ?
+            this.parser.executeAll(this.vm, operations) : [];
+        
+        // 清空缓冲区
+        this.buffer = '';
+        
+        // 触发回调
+        if (this.onUpdate && operations.length > 0) {
+            this.onUpdate({ operations, results });
+        }
+        
+        return { operations, results };
+    }
+    
+    /**
+     * 清理回复中的更新标记
+     */
+    _cleanResponse(response) {
+        // 移除 <UpdateVariable>...</UpdateVariable> 块
+        let clean = response.replace(/<UpdateVariable>[\s\S]*?<\/UpdateVariable>/gi, '');
+        
+        // 移除 /data 命令行
+        clean = clean.replace(/^\/data\s+\w+.*$/gm, '');
+        
+        // 移除 _.xxx() 调用
+        clean = clean.replace(/_\.\w+\s*\([^)]*\)/g, '');
+        
+        // 清理多余空行
+        clean = clean.replace(/\n{3,}/g, '\n\n');
+        
+        return clean.trim();
+    }
+}
+
+// ==================== 提示词构建器 ====================
+
+/**
+ * 提示词构建器 - 构建动态提示词
+ */
+class PromptBuilder {
+    constructor(variableManager, templateEngine, lorebookAdapter) {
+        this.vm = variableManager;
+        this.templateEngine = templateEngine;
+        this.lorebookAdapter = lorebookAdapter;
+    }
+    
+    /**
+     * 构建系统提示词中的变量说明部分
+     * @param {object} options - 构建选项
+     * @returns {string} 变量说明文本
+     */
+    buildVariableInstructions(options = {}) {
+        const {
+            includeSchema = true,
+            includeCurrentValues = true,
+            includeSyntaxHelp = true,
+            format = 'full' // 'full' | 'compact' | 'minimal'
+        } = options;
+        
+        let instructions = '';
+        
+        if (format !== 'minimal') {
+            instructions += '## 变量系统\n\n';
+        }
+        
+        // 当前变量值
+        if (includeCurrentValues) {
+            instructions += '### 当前变量\n';
+            instructions += '```json\n';
+            instructions += JSON.stringify(this.vm.statData, null, 2);
+            instructions += '\n```\n\n';
+        }
+        
+        // 语法说明
+        if (includeSyntaxHelp && format === 'full') {
+            instructions += '### 变量更新语法\n';
+            instructions += '使用以下格式更新变量：\n\n';
+            instructions += '```\n';
+            instructions += '/data set <路径> <值>      # 设置值\n';
+            instructions += '/data add <路径> <增量>     # 数值增减\n';
+            instructions += '/data push <路径> <值>     # 数组追加\n';
+            instructions += '/data remove <路径>        # 删除\n';
+            instructions += '```\n\n';
+            instructions += '或使用 JSON 块：\n';
+            instructions += '```\n';
+            instructions += '<UpdateVariable>\n';
+            instructions += '[{"op": "replace", "path": "路径", "value": 值}]\n';
+            instructions += '</UpdateVariable>\n';
+            instructions += '```\n\n';
+        }
+        
+        return instructions;
+    }
+    
+    /**
+     * 构建包含变量的完整提示词
+     * @param {string} basePrompt - 基础提示词
+     * @param {object} options - 选项
+     * @returns {string} 完整提示词
+     */
+    buildPrompt(basePrompt, options = {}) {
+        let prompt = '';
+        
+        // 添加变量说明
+        prompt += this.buildVariableInstructions(options);
+        
+        // 渲染基础提示词中的模板
+        prompt += this.templateEngine.renderString(basePrompt, {});
+        
+        // 添加 Lorebook 条目
+        if (options.includeLorebook !== false && this.lorebookAdapter) {
+            const activeEntries = this.lorebookAdapter.getActiveEntries();
+            if (activeEntries.length > 0) {
+                prompt += '\n\n## 世界设定\n';
+                for (const entry of activeEntries) {
+                    prompt += `\n### ${entry.name}\n`;
+                    prompt += entry.renderedContent + '\n';
+                }
+            }
+        }
+        
+        return prompt;
+    }
+}
+
+// ==================== 导入导出管理器 ====================
+
+/**
+ * 导入导出管理器 - 处理变量数据的导入导出
+ */
+class ImportExportManager {
+    constructor(variableManager, templateEngine, lorebookAdapter) {
+        this.vm = variableManager;
+        this.templateEngine = templateEngine;
+        this.lorebookAdapter = lorebookAdapter;
+    }
+    
+    /**
+     * 导出所有数据
+     * @param {object} options - 导出选项
+     * @returns {object} 导出的数据
+     */
+    exportAll(options = {}) {
+        const {
+            includeVariables = true,
+            includeTemplates = true,
+            includeLorebook = true,
+            format = 'json' // 'json' | 'yaml'
+        } = options;
+        
+        const data = {
+            version: '1.0',
+            exportedAt: new Date().toISOString(),
+        };
+        
+        if (includeVariables) {
+            data.variables = this.vm.export();
+        }
+        
+        if (includeTemplates) {
+            data.templates = this.templateEngine.getAllTemplates();
+        }
+        
+        if (includeLorebook && this.lorebookAdapter) {
+            data.lorebook = Array.from(this.lorebookAdapter.managedEntries.values());
+        }
+        
+        return data;
+    }
+    
+    /**
+     * 导入数据
+     * @param {object} data - 要导入的数据
+     * @param {object} options - 导入选项
+     */
+    importAll(data, options = {}) {
+        const {
+            mergeVariables = false,
+            clearExisting = false
+        } = options;
+        
+        if (clearExisting) {
+            this.vm.statData = {};
+            this.vm.displayData = {};
+            this.vm.deltaData = {};
+        }
+        
+        if (data.variables) {
+            if (mergeVariables) {
+                Object.assign(this.vm.statData, data.variables.stat_data || {});
+            } else {
+                this.vm.import(data.variables);
+            }
+        }
+        
+        if (data.templates) {
+            this.templateEngine.registerTemplates(data.templates);
+        }
+        
+        if (data.lorebook && this.lorebookAdapter) {
+            this.lorebookAdapter.registerEntries(data.lorebook);
+        }
+    }
+    
+    /**
+     * 导出为 JSON 字符串
+     */
+    exportToJSON(options = {}) {
+        const data = this.exportAll(options);
+        return JSON.stringify(data, null, 2);
+    }
+    
+    /**
+     * 从 JSON 字符串导入
+     */
+    importFromJSON(jsonString, options = {}) {
+        try {
+            const data = JSON.parse(jsonString);
+            this.importAll(data, options);
+            return { success: true };
+        } catch (e) {
+            return { success: false, error: e.message };
+        }
+    }
+    
+    /**
+     * 下载导出文件
+     */
+    downloadExport(filename = 'edp-export.json', options = {}) {
+        const json = this.exportToJSON(options);
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        
+        URL.revokeObjectURL(url);
+    }
+}
+
 // ==================== 全局实例 ====================
 
 const variableManager = new VariableManager();
 const updateParser = new UpdateParser();
 const templateEngine = new TemplateEngine(variableManager);
+const lorebookAdapter = new LorebookAdapter(variableManager, templateEngine);
+const responseProcessor = new ResponseProcessor(variableManager, updateParser);
+const promptBuilder = new PromptBuilder(variableManager, templateEngine, lorebookAdapter);
+const importExportManager = new ImportExportManager(variableManager, templateEngine, lorebookAdapter);
 
 // ==================== UI 相关 ====================
+
+/** 当前编辑的模板 */
+let currentTemplateId = null;
 
 /**
  * 加载设置
@@ -1153,6 +2080,9 @@ async function loadSettings() {
     $("#edp_enabled").prop("checked", extension_settings[extensionName].enabled);
     $("#edp_auto_update").prop("checked", extension_settings[extensionName].autoUpdate);
     $("#edp_debug_mode").prop("checked", extension_settings[extensionName].debugMode);
+    
+    // 设置响应处理器模式
+    responseProcessor.setMode(extension_settings[extensionName].updateMode || 'streaming');
 }
 
 /**
@@ -1160,11 +2090,16 @@ async function loadSettings() {
  */
 function onSettingChange(settingKey) {
     return function(event) {
-        const value = $(event.target).is(':checkbox') ? 
-            $(event.target).prop("checked") : 
+        const value = $(event.target).is(':checkbox') ?
+            $(event.target).prop("checked") :
             $(event.target).val();
         extension_settings[extensionName][settingKey] = value;
         saveSettingsDebounced();
+        
+        // 特殊处理
+        if (settingKey === 'updateMode') {
+            responseProcessor.setMode(value);
+        }
     };
 }
 
@@ -1172,10 +2107,23 @@ function onSettingChange(settingKey) {
  * 打开主面板
  */
 function openMainPanel() {
-    // 显示主面板弹窗
+    // 创建遮罩层
+    let overlay = document.getElementById('edp_overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'edp_overlay';
+        overlay.className = 'edp-overlay';
+        overlay.onclick = closeMainPanel;
+        document.body.appendChild(overlay);
+    }
+    overlay.style.display = 'block';
+    
+    // 显示主面板
     const panel = document.getElementById('edp_main_panel');
     if (panel) {
-        panel.style.display = 'block';
+        panel.style.display = 'flex';
+        refreshVariableTree();
+        refreshTemplateList();
     }
 }
 
@@ -1187,6 +2135,11 @@ function closeMainPanel() {
     if (panel) {
         panel.style.display = 'none';
     }
+    
+    const overlay = document.getElementById('edp_overlay');
+    if (overlay) {
+        overlay.style.display = 'none';
+    }
 }
 
 /**
@@ -1197,7 +2150,8 @@ function refreshVariableTree() {
     if (!container) return;
     
     const data = variableManager.export();
-    container.innerHTML = renderVariableTree(data.stat_data, '');
+    const html = renderVariableTree(data.stat_data, '');
+    container.innerHTML = html || '<div class="edp-empty">暂无变量数据</div>';
 }
 
 /**
@@ -1206,32 +2160,341 @@ function refreshVariableTree() {
 function renderVariableTree(obj, path, depth = 0) {
     if (obj === null || obj === undefined) return '';
     if (typeof obj !== 'object') {
-        return `<div class="edp-var-item" style="padding-left: ${depth * 16}px">
-            <span class="edp-var-path">${path}</span>: 
-            <span class="edp-var-value">${JSON.stringify(obj)}</span>
+        const escapedValue = escapeHtml(JSON.stringify(obj));
+        return `<div class="edp-var-item" style="padding-left: ${depth * 16}px" data-path="${path}">
+            <span class="edp-var-key">${escapeHtml(path.split('.').pop())}</span>:
+            <span class="edp-var-value">${escapedValue}</span>
+            <span class="edp-var-actions">
+                <button class="edp-btn-tiny" onclick="EDP_UI.editVariable('${path}')" title="编辑">✏️</button>
+            </span>
         </div>`;
     }
     
     let html = '';
-    for (const [key, value] of Object.entries(obj)) {
-        if (key === '$meta') continue; // 跳过元数据
-        
+    const entries = Object.entries(obj).filter(([key]) => key !== '$meta');
+    
+    if (entries.length === 0) {
+        return '<div class="edp-empty">空对象</div>';
+    }
+    
+    for (const [key, value] of entries) {
         const newPath = path ? `${path}.${key}` : key;
+        const escapedKey = escapeHtml(key);
         
         if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
             html += `<div class="edp-var-group" style="padding-left: ${depth * 16}px">
-                <span class="edp-var-key">📁 ${key}</span>
+                <span class="edp-var-key edp-collapsible" onclick="EDP_UI.toggleGroup(this)">📁 ${escapedKey}</span>
+                <span class="edp-var-actions">
+                    <button class="edp-btn-tiny" onclick="EDP_UI.addVariable('${newPath}')" title="添加子项">+</button>
+                </span>
             </div>`;
+            html += `<div class="edp-var-children">`;
             html += renderVariableTree(value, newPath, depth + 1);
+            html += `</div>`;
+        } else if (Array.isArray(value)) {
+            html += `<div class="edp-var-group" style="padding-left: ${depth * 16}px">
+                <span class="edp-var-key edp-collapsible" onclick="EDP_UI.toggleGroup(this)">📋 ${escapedKey} [${value.length}]</span>
+                <span class="edp-var-actions">
+                    <button class="edp-btn-tiny" onclick="EDP_UI.pushToArray('${newPath}')" title="追加元素">+</button>
+                </span>
+            </div>`;
+            html += `<div class="edp-var-children">`;
+            value.forEach((item, index) => {
+                const itemPath = `${newPath}.${index}`;
+                if (typeof item === 'object' && item !== null) {
+                    html += renderVariableTree(item, itemPath, depth + 1);
+                } else {
+                    html += `<div class="edp-var-item" style="padding-left: ${(depth + 1) * 16}px" data-path="${itemPath}">
+                        <span class="edp-var-key">[${index}]</span>:
+                        <span class="edp-var-value">${escapeHtml(JSON.stringify(item))}</span>
+                        <span class="edp-var-actions">
+                            <button class="edp-btn-tiny" onclick="EDP_UI.editVariable('${itemPath}')" title="编辑">✏️</button>
+                            <button class="edp-btn-tiny" onclick="EDP_UI.removeVariable('${itemPath}')" title="删除">🗑️</button>
+                        </span>
+                    </div>`;
+                }
+            });
+            html += `</div>`;
         } else {
-            html += `<div class="edp-var-item" style="padding-left: ${depth * 16}px">
-                <span class="edp-var-key">${key}</span>: 
-                <span class="edp-var-value">${JSON.stringify(value)}</span>
+            const escapedValue = escapeHtml(JSON.stringify(value));
+            html += `<div class="edp-var-item" style="padding-left: ${depth * 16}px" data-path="${newPath}">
+                <span class="edp-var-key">${escapedKey}</span>:
+                <span class="edp-var-value">${escapedValue}</span>
+                <span class="edp-var-actions">
+                    <button class="edp-btn-tiny" onclick="EDP_UI.editVariable('${newPath}')" title="编辑">✏️</button>
+                    <button class="edp-btn-tiny" onclick="EDP_UI.removeVariable('${newPath}')" title="删除">🗑️</button>
+                </span>
             </div>`;
         }
     }
     return html;
 }
+
+/**
+ * HTML 转义
+ */
+function escapeHtml(str) {
+    if (typeof str !== 'string') str = String(str);
+    return str.replace(/[&<>"']/g, char => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    })[char]);
+}
+
+/**
+ * 刷新模板列表
+ */
+function refreshTemplateList() {
+    const container = document.getElementById('edp_template_list');
+    if (!container) return;
+    
+    const templates = templateEngine.getAllTemplates();
+    const systemTemplates = templates.filter(t => t.category === 'system');
+    const userTemplates = templates.filter(t => t.category !== 'system');
+    
+    let html = '';
+    
+    // 系统模板
+    html += `<div class="edp-tree-group">
+        <div class="edp-tree-header" onclick="EDP_UI.toggleGroup(this)">▶ 系统模板</div>
+        <div class="edp-tree-items">`;
+    if (systemTemplates.length > 0) {
+        systemTemplates.forEach(t => {
+            html += `<div class="edp-tree-item ${currentTemplateId === t.id ? 'active' : ''}"
+                         onclick="EDP_UI.selectTemplate('${t.id}')">${escapeHtml(t.name || t.id)}</div>`;
+        });
+    } else {
+        html += `<div class="edp-tree-item edp-empty">暂无模板</div>`;
+    }
+    html += `</div></div>`;
+    
+    // 用户模板
+    html += `<div class="edp-tree-group">
+        <div class="edp-tree-header" onclick="EDP_UI.toggleGroup(this)">▶ 用户模板</div>
+        <div class="edp-tree-items">`;
+    if (userTemplates.length > 0) {
+        userTemplates.forEach(t => {
+            html += `<div class="edp-tree-item ${currentTemplateId === t.id ? 'active' : ''}"
+                         onclick="EDP_UI.selectTemplate('${t.id}')">${escapeHtml(t.name || t.id)}</div>`;
+        });
+    } else {
+        html += `<div class="edp-tree-item edp-empty">暂无模板</div>`;
+    }
+    html += `</div></div>`;
+    
+    container.innerHTML = html;
+}
+
+/**
+ * 选择模板
+ */
+function selectTemplate(templateId) {
+    currentTemplateId = templateId;
+    const template = templateEngine.getTemplate(templateId);
+    
+    if (template) {
+        // 填充编辑器
+        $('#edp_code_editor').val(template.content || '');
+        $('#edp_template_name').val(template.name || templateId);
+        $('#edp_template_category').val(template.category || 'user');
+        $('#edp_template_desc').val(template.description || '');
+        
+        // 更新预览
+        updatePreview();
+    }
+    
+    refreshTemplateList();
+}
+
+/**
+ * 创建新模板
+ */
+function createNewTemplate() {
+    const id = `template_${Date.now()}`;
+    templateEngine.registerTemplate(id, {
+        id,
+        name: '新模板',
+        content: '<!-- 在此编写模板内容 -->\n{{变量路径}}',
+        category: 'user',
+        description: ''
+    });
+    selectTemplate(id);
+}
+
+/**
+ * 保存当前模板
+ */
+function saveCurrentTemplate() {
+    if (!currentTemplateId) {
+        alert('请先选择或创建一个模板');
+        return;
+    }
+    
+    const template = {
+        id: currentTemplateId,
+        name: $('#edp_template_name').val() || currentTemplateId,
+        content: $('#edp_code_editor').val(),
+        category: $('#edp_template_category').val(),
+        description: $('#edp_template_desc').val()
+    };
+    
+    templateEngine.registerTemplate(currentTemplateId, template);
+    refreshTemplateList();
+    console.log('[EDP] 模板已保存:', currentTemplateId);
+}
+
+/**
+ * 更新预览
+ */
+function updatePreview() {
+    const previewContainer = document.getElementById('edp_preview_output');
+    if (!previewContainer) return;
+    
+    const content = $('#edp_code_editor').val();
+    if (!content) {
+        previewContainer.innerHTML = '<p class="edp-placeholder">预览结果将显示在这里</p>';
+        return;
+    }
+    
+    try {
+        const rendered = templateEngine.renderString(content, {});
+        previewContainer.textContent = rendered;
+    } catch (e) {
+        previewContainer.innerHTML = `<span class="edp-error">渲染错误: ${escapeHtml(e.message)}</span>`;
+    }
+}
+
+/**
+ * 切换标签页
+ */
+function switchTab(tabName) {
+    // 更新标签按钮
+    document.querySelectorAll('.edp-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.tab === tabName);
+    });
+    
+    // 更新内容
+    document.querySelectorAll('.edp-tab-content').forEach(content => {
+        content.classList.toggle('active', content.id === `edp_tab_${tabName}`);
+    });
+}
+
+/**
+ * 导入数据
+ */
+function importData() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.onchange = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        try {
+            const text = await file.text();
+            const result = importExportManager.importFromJSON(text);
+            if (result.success) {
+                refreshVariableTree();
+                refreshTemplateList();
+                alert('导入成功！');
+            } else {
+                alert(`导入失败: ${result.error}`);
+            }
+        } catch (err) {
+            alert(`导入失败: ${err.message}`);
+        }
+    };
+    input.click();
+}
+
+/**
+ * 导出数据
+ */
+function exportData() {
+    importExportManager.downloadExport('edp-export.json');
+}
+
+// UI 操作对象（暴露给 onclick）
+const EDP_UI = {
+    toggleGroup(element) {
+        const parent = element.closest('.edp-var-group, .edp-tree-group');
+        if (parent) {
+            const children = parent.querySelector('.edp-var-children, .edp-tree-items');
+            if (children) {
+                children.style.display = children.style.display === 'none' ? '' : 'none';
+                // 更新箭头
+                if (element.textContent.startsWith('▶')) {
+                    element.textContent = element.textContent.replace('▶', '▼');
+                } else if (element.textContent.startsWith('▼')) {
+                    element.textContent = element.textContent.replace('▼', '▶');
+                }
+            }
+        }
+    },
+    
+    editVariable(path) {
+        const currentValue = variableManager.get(path);
+        const newValue = prompt(`编辑变量 ${path}:`, JSON.stringify(currentValue));
+        if (newValue !== null) {
+            try {
+                const parsed = JSON.parse(newValue);
+                variableManager.set(path, parsed);
+                refreshVariableTree();
+            } catch {
+                // 如果不是有效 JSON，当作字符串
+                variableManager.set(path, newValue);
+                refreshVariableTree();
+            }
+        }
+    },
+    
+    addVariable(parentPath) {
+        const key = prompt('输入新变量名:');
+        if (key) {
+            const value = prompt('输入变量值 (JSON 格式):');
+            if (value !== null) {
+                try {
+                    const parsed = JSON.parse(value);
+                    variableManager.set(`${parentPath}.${key}`, parsed);
+                } catch {
+                    variableManager.set(`${parentPath}.${key}`, value);
+                }
+                refreshVariableTree();
+            }
+        }
+    },
+    
+    pushToArray(path) {
+        const value = prompt('输入要追加的值 (JSON 格式):');
+        if (value !== null) {
+            try {
+                const parsed = JSON.parse(value);
+                variableManager.push(path, parsed);
+            } catch {
+                variableManager.push(path, value);
+            }
+            refreshVariableTree();
+        }
+    },
+    
+    removeVariable(path) {
+        if (confirm(`确定删除 ${path}?`)) {
+            variableManager.remove(path);
+            refreshVariableTree();
+        }
+    },
+    
+    selectTemplate,
+    createNewTemplate,
+    saveCurrentTemplate,
+    switchTab,
+};
+
+// 暴露给全局
+window.EDP_UI = EDP_UI;
 
 // ==================== 扩展入口 ====================
 
@@ -1249,6 +2512,35 @@ jQuery(async () => {
     
     // 绑定按钮事件
     $("#edp_open_panel").on("click", openMainPanel);
+    $("#edp_panel_close").on("click", closeMainPanel);
+    
+    // 模板编辑器事件
+    $("#edp_new_template").on("click", createNewTemplate);
+    $("#edp_save").on("click", saveCurrentTemplate);
+    $("#edp_refresh_vars").on("click", refreshVariableTree);
+    
+    // 导入导出
+    $("#edp_import").on("click", importData);
+    $("#edp_export").on("click", exportData);
+    
+    // 标签页切换
+    $(document).on("click", ".edp-tab", function() {
+        switchTab($(this).data("tab"));
+    });
+    
+    // 代码编辑器自动预览
+    $("#edp_code_editor").on("input", function() {
+        if ($("#edp_auto_preview").prop("checked")) {
+            updatePreview();
+        }
+    });
+    $("#edp_manual_preview").on("click", updatePreview);
+    
+    // 应用按钮 - 保存并更新预览
+    $("#edp_apply").on("click", function() {
+        saveCurrentTemplate();
+        updatePreview();
+    });
     
     // 加载设置
     await loadSettings();
@@ -1256,8 +2548,17 @@ jQuery(async () => {
     // 监听变量变化事件
     document.addEventListener('edp_variable_changed', (e) => {
         const { path, oldValue, newValue, reason } = e.detail;
-        console.log(`[EDP] 变量变化: ${path} = ${oldValue} → ${newValue}` + (reason ? ` (${reason})` : ''));
+        if (extension_settings[extensionName]?.debugMode) {
+            console.log(`[EDP] 变量变化: ${path} = ${oldValue} → ${newValue}` + (reason ? ` (${reason})` : ''));
+        }
         refreshVariableTree();
+    });
+    
+    // 设置更新回调
+    responseProcessor.setUpdateCallback(({ operations, results }) => {
+        if (extension_settings[extensionName]?.debugMode) {
+            console.log('[EDP] 变量更新完成:', operations.length, '个操作');
+        }
     });
     
     console.log('[EDP] EasyDynamicPrompts 扩展加载完成');
@@ -1269,6 +2570,10 @@ window.EasyDynamicPrompts = {
     variableManager,
     updateParser,
     templateEngine,
+    lorebookAdapter,
+    responseProcessor,
+    promptBuilder,
+    importExportManager,
     
     // 核心类
     VariableManager,
@@ -1281,6 +2586,13 @@ window.EasyDynamicPrompts = {
     CalcEngine,
     OperationExecutor,
     BatchExecutor,
+    SchemaValidator,
+    
+    // 适配器和处理器类
+    LorebookAdapter,
+    ResponseProcessor,
+    PromptBuilder,
+    ImportExportManager,
     
     // 工具函数
     deepClone,
