@@ -5,7 +5,8 @@
 </p>
 
 <p align="center">
-  为 SillyTavern 设计的强大动态提示词构建工具，提供变量管理、条件逻辑、模板系统和自动适配功能。
+  为 SillyTavern 设计的强大动态提示词构建工具，提供变量管理、条件逻辑、模板系统和自动适配功能。<br>
+  变量操作语法参考 <strong>Minecraft 指令</strong> 和 <strong>JSON Patch (RFC 6902)</strong> 设计。
 </p>
 
 ---
@@ -20,6 +21,8 @@
 | 🔄 **自动更新** | 解析 AI 回复中的变量更新命令 |
 | 📊 **变化追踪** | 记录变量变化历史，支持 display_data 和 delta_data |
 | 📦 **导入导出** | 支持 JSON 格式配置导入导出 |
+| ⚡ **批量原子操作** | 支持多操作原子执行和回滚 |
+| 🧮 **变量间运算** | 支持变量之间的数学运算 |
 
 ## 📥 安装
 
@@ -46,30 +49,81 @@ git clone https://github.com/LucNocturne/EasyDynamicPrompts.git
 
 ## 📖 变量更新语法
 
+### 主要格式：`/data` 命令
+
 AI 可以在回复中使用以下命令更新变量：
 
+```bash
+# 设置变量
+/data set 角色.络络.好感度 50
+
+# 设置变量（带旧值校验）
+/data set 角色.络络.好感度 55 test 50
+
+# 数值增减
+/data add 角色.络络.好感度 5
+/data add 角色.络络.好感度 -3
+
+# 向数组添加元素
+/data push 背包 "治疗药水"
+/data insert 背包 0 "重要物品"
+
+# 删除变量
+/data remove 临时标记
+/data remove 背包.0
+
+# 移动/复制变量
+/data move 临时.物品 背包/-
+/data copy 模板.技能 角色.技能
+
+# 变量间运算
+/data calc 总伤害 "基础伤害 + 装备加成"
+
+# 数组/对象修改
+/data modify 背包 append "新物品"
+/data modify 背包 merge ["物品1", "物品2"]
+/data modify 角色.属性 merge {"力量": 10}
+
+# 条件测试
+/data test 角色.HP gte 0
+/data test 角色.状态 eq "正常"
+/data test 角色.buff exists
+```
+
+### 命令列表
+
+| 命令 | 格式 | 说明 |
+|------|------|------|
+| `set` | `/data set <path> <value> [test <old>]` | 设置值 |
+| `add` | `/data add <path> <delta>` | 数值增减 |
+| `push` | `/data push <path> <value>` | 数组尾部追加 |
+| `insert` | `/data insert <path> <index> <value>` | 指定位置插入 |
+| `remove` | `/data remove <path>` | 删除值 |
+| `move` | `/data move <from> <to>` | 移动值 |
+| `copy` | `/data copy <from> <to>` | 复制值 |
+| `calc` | `/data calc <path> "<expr>"` | 变量运算 |
+| `modify` | `/data modify <path> <action> <value>` | 数组/对象修改 |
+| `test` | `/data test <path> <condition> [value]` | 条件测试 |
+
+### 备用格式：JSON 块
+
+```xml
+<UpdateVariable>
+[
+  {"op": "increment", "path": "角色.络络.好感度", "delta": 5},
+  {"op": "add", "path": "背包/-", "value": "新物品"},
+  {"op": "replace", "path": "角色.络络.状态", "value": "开心"}
+]
+</UpdateVariable>
+```
+
+### 向后兼容：函数调用格式
+
 ```javascript
-// 设置变量
 _.set('角色.络络.好感度', 50)
-
-// 设置变量（带旧值校验）
-_.set('角色.络络.好感度', 50, 55)
-
-// 数值增减
 _.add('角色.络络.好感度', 5)
-_.add('角色.络络.好感度', -3)
-
-// 向数组添加元素
-_.assign('背包', '新物品')
-
-// 向对象添加键值对
-_.assign('技能', '火球术', { 等级: 1 })
-
-// 删除变量
+_.push('背包', '新物品')
 _.remove('临时标记')
-
-// 从数组删除元素
-_.remove('背包', '消耗品')
 ```
 
 ## 📝 模板语法
@@ -111,6 +165,10 @@ _.remove('背包', '消耗品')
 }
 ```
 
+## 📚 详细文档
+
+- [变量操作设计文档](VARIABLE_OPERATIONS_DESIGN.md) - 完整的语法设计和示例
+
 ## ⚠️ 许可证
 
 本项目使用**自定义许可证**，包含特定社区限制条款。
@@ -134,5 +192,7 @@ _.remove('背包', '消耗品')
 | [SillyTavern](https://github.com/SillyTavern/SillyTavern) | 强大的 AI 角色扮演前端平台 |
 | [TavernHelper](https://github.com/N0VI028/JS-Slash-Runner) | 提供扩展 API 和脚本运行环境 |
 | [MVU 变量框架](https://github.com/MagicalAstrogy/MagVarUpdate) | 变量更新语法机制的设计参考 |
+| [Minecraft](https://minecraft.net) | `/data` 命令语法设计灵感来源 |
+| [JSON Patch (RFC 6902)](https://jsonpatch.com/) | 操作类型和批量操作设计参考 |
 
 感谢所有贡献者和社区成员的支持！
