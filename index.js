@@ -2113,7 +2113,7 @@ function openMainPanel() {
         overlay = document.createElement('div');
         overlay.id = 'edp_overlay';
         overlay.className = 'edp-overlay';
-        overlay.onclick = closeMainPanel;
+        overlay.addEventListener('click', closeMainPanel);
         document.body.appendChild(overlay);
     }
     overlay.style.display = 'block';
@@ -2122,6 +2122,10 @@ function openMainPanel() {
     const panel = document.getElementById('edp_main_panel');
     if (panel) {
         panel.style.display = 'flex';
+        // 阻止面板内部点击事件冒泡到遮罩层
+        panel.onclick = function(e) {
+            e.stopPropagation();
+        };
         refreshVariableTree();
         refreshTemplateList();
     }
