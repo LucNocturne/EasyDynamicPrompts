@@ -1,0 +1,31 @@
+# 参考文件和类型定义（仅用于开发）
+@types/
+归墟参考/
+
+# 设计文档（仅用于开发）
+DESIGN.md
+IMPLEMENTATION_PLAN.md
+AUTO_ADAPT_DESIGN.md
+ARCHITECTURE.md
+
+# 依赖目录
+node_modules/
+
+# 编辑器和IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+npm-debug.log*
+
+# 临时文件
+*.tmp
+*.temp

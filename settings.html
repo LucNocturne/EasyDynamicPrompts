@@ -1,0 +1,156 @@
+<!-- EasyDynamicPrompts 设置面板 -->
+<div class="edp-settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>EasyDynamicPrompts</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <!-- 启用开关 -->
+            <div class="edp-setting-block flex-container">
+                <input id="edp_enabled" type="checkbox" />
+                <label for="edp_enabled">启用扩展</label>
+            </div>
+
+            <!-- 自动更新 -->
+            <div class="edp-setting-block flex-container">
+                <input id="edp_auto_update" type="checkbox" />
+                <label for="edp_auto_update">自动更新变量</label>
+            </div>
+
+            <!-- 调试模式 -->
+            <div class="edp-setting-block flex-container">
+                <input id="edp_debug_mode" type="checkbox" />
+                <label for="edp_debug_mode">调试模式</label>
+            </div>
+
+            <hr class="sysHR" />
+
+            <!-- 打开主面板按钮 -->
+            <div class="edp-setting-block flex-container">
+                <input id="edp_open_panel" class="menu_button" type="button" value="打开编辑器" />
+            </div>
+
+            <hr class="sysHR" />
+        </div>
+    </div>
+</div>
+
+<!-- 主面板（弹窗） -->
+<div id="edp_main_panel" class="edp-main-panel" style="display: none;">
+    <div class="edp-panel-header">
+        <h3>EasyDynamicPrompts - 动态提示词编辑器</h3>
+        <div class="edp-panel-actions">
+            <button id="edp_panel_settings" class="menu_button" title="设置">⚙️</button>
+            <button id="edp_panel_help" class="menu_button" title="帮助">❓</button>
+            <button id="edp_panel_close" class="menu_button" title="关闭" onclick="document.getElementById('edp_main_panel').style.display='none'">✕</button>
+        </div>
+    </div>
+
+    <div class="edp-panel-body">
+        <!-- 左侧：模板列表和变量浏览器 -->
+        <div class="edp-sidebar">
+            <!-- 模板列表 -->
+            <div class="edp-section">
+                <div class="edp-section-header">
+                    <span>📁 模板库</span>
+                    <button class="edp-btn-small" id="edp_new_template" title="新建模板">+</button>
+                </div>
+                <div class="edp-section-content" id="edp_template_list">
+                    <div class="edp-tree-group">
+                        <div class="edp-tree-header">▶ 系统模板</div>
+                        <div class="edp-tree-items">
+                            <div class="edp-tree-item">变量初始化</div>
+                            <div class="edp-tree-item">更新规则</div>
+                        </div>
+                    </div>
+                    <div class="edp-tree-group">
+                        <div class="edp-tree-header">▶ 用户模板</div>
+                        <div class="edp-tree-items">
+                            <div class="edp-tree-item edp-empty">暂无模板</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 变量浏览器 -->
+            <div class="edp-section">
+                <div class="edp-section-header">
+                    <span>📊 变量浏览器</span>
+                    <button class="edp-btn-small" id="edp_refresh_vars" title="刷新">🔄</button>
+                </div>
+                <div class="edp-section-content" id="edp_variable_tree">
+                    <div class="edp-empty">暂无变量数据</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右侧：编辑器和预览 -->
+        <div class="edp-main-content">
+            <!-- 编辑器 -->
+            <div class="edp-editor-section">
+                <div class="edp-tabs">
+                    <button class="edp-tab active" data-tab="visual">可视化</button>
+                    <button class="edp-tab" data-tab="code">代码</button>
+                    <button class="edp-tab" data-tab="settings">设置</button>
+                </div>
+                <div class="edp-editor-content">
+                    <div class="edp-tab-content active" id="edp_tab_visual">
+                        <div class="edp-visual-editor">
+                            <p class="edp-placeholder">选择一个模板开始编辑，或创建新模板</p>
+                        </div>
+                    </div>
+                    <div class="edp-tab-content" id="edp_tab_code">
+                        <textarea id="edp_code_editor" class="edp-code-textarea" placeholder="在此输入模板代码..."></textarea>
+                    </div>
+                    <div class="edp-tab-content" id="edp_tab_settings">
+                        <div class="edp-template-settings">
+                            <div class="edp-form-group">
+                                <label>模板名称</label>
+                                <input type="text" id="edp_template_name" placeholder="输入模板名称" />
+                            </div>
+                            <div class="edp-form-group">
+                                <label>模板分类</label>
+                                <select id="edp_template_category">
+                                    <option value="system">系统</option>
+                                    <option value="user">用户</option>
+                                </select>
+                            </div>
+                            <div class="edp-form-group">
+                                <label>描述</label>
+                                <textarea id="edp_template_desc" placeholder="模板描述（可选）"></textarea>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 预览 -->
+            <div class="edp-preview-section">
+                <div class="edp-section-header">
+                    <span>👁️ 预览</span>
+                    <label class="edp-checkbox-inline">
+                        <input type="checkbox" id="edp_auto_preview" checked />
+                        自动刷新
+                    </label>
+                    <button class="edp-btn-small" id="edp_manual_preview" title="手动刷新">🔄</button>
+                </div>
+                <div class="edp-preview-content" id="edp_preview_output">
+                    <p class="edp-placeholder">预览结果将显示在这里</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="edp-panel-footer">
+        <div class="edp-footer-left">
+            <button class="menu_button" id="edp_import">📥 导入</button>
+            <button class="menu_button" id="edp_export">📤 导出</button>
+            <button class="menu_button" id="edp_adapt">🔮 一键适配</button>
+        </div>
+        <div class="edp-footer-right">
+            <button class="menu_button" id="edp_save">💾 保存</button>
+            <button class="menu_button" id="edp_apply">▶️ 应用</button>
+        </div>
+    </div>
+</div>

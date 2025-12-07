@@ -1,0 +1,11 @@
+{
+    "display_name": "EasyDynamicPrompts",
+    "loading_order": 10,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "EasyDynamicPrompts Team",
+    "version": "0.1.0",
+    "homePage": "https://github.com/your-repo/EasyDynamicPrompts"
+}
